@@ -88,54 +88,56 @@
         window.writeBatch = writeBatch;
         
         // --- 1. CONFIGURACIÓN DE FIREBASE (Sincronización de Base de Datos) ---
-        // La configuración de Firebase (como tu apiKey, projectId, etc.) se carga automáticamente
-        // del entorno a través de la variable __firebase_config.
-        const ENVIRONMENT_CONFIG = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-        const FIREBASE_CONFIG = ENVIRONMENT_CONFIG; 
+        // Las variables globales de Firebase se definen aquí (como null o 'anon') y se actualizan al iniciar.
+        window.db = null; 
+        window.auth = null;
+        window.userId = 'anon';
+        window.isFirebaseReady = false; // NUEVO: Estado de listo de Firebase/Auth
+
+        // Rutas de colección (se definirán en initFirebase)
+        window.PLAYER_SCORES_COLLECTION_PATH = '';
+        window.QUIZ_QUESTIONS_COLLECTION_PATH = '';
+        window.QUIZ_SETTINGS_DOC_PATH = '';
         
-        const appIdForPaths = typeof __app_id !== 'undefined' ? __app_id : 'default-quiz-app';
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-
-        // --- 2. DEFINICIÓN DE RUTAS PÚBLICAS DE FIRESTORE (Datos Compartidos) ---
-        // Estas rutas son para datos públicos/compartidos (preguntas, leaderboard)
-        window.PLAYER_SCORES_COLLECTION_PATH = `/artifacts/${appIdForPaths}/public/data/player_scores`;
-        window.QUIZ_QUESTIONS_COLLECTION_PATH = `/artifacts/${appIdForPaths}/public/data/questions`; 
-        window.QUIZ_SETTINGS_DOC_PATH = `/artifacts/${appIdForPaths}/public/data/settings/config`; 
-
-        let db, auth, userId = 'anon';
-
         // Inicialización y autenticación de Firebase
         window.initFirebase = async () => {
+            const ENVIRONMENT_CONFIG = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+            const FIREBASE_CONFIG = ENVIRONMENT_CONFIG; 
+            const appIdForPaths = typeof __app_id !== 'undefined' ? __app_id : 'default-quiz-app';
+            const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
             if (!FIREBASE_CONFIG) {
                 console.error("Firebase config is missing.");
                 document.getElementById('firebase-status').textContent = '❌ Error: Configuración de Firebase no encontrada.';
                 return;
             }
             try {
-                // Inicializa la app de Firebase con la configuración del entorno
                 const app = initializeApp(FIREBASE_CONFIG);
-                // Obtiene la instancia de Firestore (la base de datos)
-                db = getFirestore(app);
-                auth = getAuth(app);
+                window.db = getFirestore(app);
+                window.auth = getAuth(app);
 
                 // Autentica automáticamente al usuario
-                if (initialAuthToken && typeof initialAuthToken === 'string' && initialAuthToken.length > 0) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
+                const signInPromise = (initialAuthToken && typeof initialAuthToken === 'string' && initialAuthToken.length > 0)
+                    ? signInWithCustomToken(window.auth, initialAuthToken)
+                    : signInAnonymously(window.auth);
 
-                onAuthStateChanged(auth, (user) => {
+                await signInPromise;
+
+                onAuthStateChanged(window.auth, (user) => {
                     if (user) {
-                        userId = user.uid;
-                        document.getElementById('firebase-status').textContent = `✅ Sincronización OK. Usuario ID: ${userId.substring(0, 8)}...`; 
-                        console.log('Firebase initialized and authenticated. User ID:', userId);
-                        // Exponer al ámbito global
-                        window.db = db; // Usado para interactuar con Firestore
-                        window.auth = auth;
-                        window.userId = userId;
-                        // Carga los datos del quiz desde Firestore
-                        loadQuizData();
+                        window.userId = user.uid;
+                        document.getElementById('firebase-status').textContent = `✅ Sincronización OK. Usuario ID: ${window.userId.substring(0, 8)}...`; 
+                        console.log('Firebase initialized and authenticated. User ID:', window.userId);
+                        
+                        // --- DEFINICIÓN DE RUTAS PÚBLICAS DE FIRESTORE (Despues de tener el ID de App) ---
+                        window.PLAYER_SCORES_COLLECTION_PATH = `/artifacts/${appIdForPaths}/public/data/player_scores`;
+                        window.QUIZ_QUESTIONS_COLLECTION_PATH = `/artifacts/${appIdForPaths}/public/data/questions`; 
+                        window.QUIZ_SETTINGS_DOC_PATH = `/artifacts/${appIdForPaths}/public/data/settings/config`; 
+                        
+                        window.isFirebaseReady = true; // El estado es listo.
+
+                        // Carga los datos del quiz desde Firestore UNA VEZ autenticado y listas las rutas
+                        loadQuizData(); 
                     } else {
                         console.error("User not signed in.");
                         document.getElementById('firebase-status').textContent = '❌ Error de autenticación';
@@ -146,8 +148,9 @@
                 document.getElementById('firebase-status').textContent = `❌ Error al cargar Firebase: ${error.code || error.message}`;
             }
         };
+        
+        // No se llama aquí, se llama en window.onload del script principal.
 
-        window.initFirebase();
     </script>
 </head>
 <body class="min-h-screen flex items-center justify-center p-4">
@@ -391,7 +394,8 @@
         let isToneInitialized = false;
 
         async function initTone() {
-            if (isToneInitialized || !window.Tone) return;
+            // Se corrige la llamada: window.Tone es la librería cargada por el módulo.
+            if (isToneInitialized || !window.Tone || typeof window.Tone.start !== 'function') return;
             
             try {
                 // Activa el AudioContext.
@@ -400,6 +404,7 @@
                 const PolySynth = window.Tone.PolySynth;
                 const Synth = window.Tone.Synth;
 
+                // Inicializar y configurar el sintetizador
                 synth = new PolySynth(Synth, {
                     oscillator: { type: "square" },
                     envelope: { release: 0.1 }
@@ -451,7 +456,8 @@
             }
             
             // Si volvemos a la pantalla de inicio, recargamos la configuración por si cambió
-            if (screenId === 'start-screen') {
+            if (screenId === 'start-screen' && window.isFirebaseReady) {
+                // Solo recargar si Firebase está listo
                 loadQuizData(); 
             }
         }
@@ -523,9 +529,9 @@
             const startBtn = document.getElementById('start-game-button');
             startBtn.disabled = true;
             
-            // Verificamos que la instancia de Firestore (db) esté disponible, lo que confirma la sincronización.
-            if (!window.db) {
-                statusMsg.textContent = "Error: Base de datos no disponible.";
+            // Revisa el nuevo estado de listo de Firebase
+            if (!window.isFirebaseReady) {
+                statusMsg.textContent = "Cargando. Base de datos no lista.";
                 return;
             }
 
@@ -548,6 +554,7 @@
 
                 // 2. Cargar Preguntas
                 // Accede a la colección de preguntas de la base de datos sincronizada
+                // Usamos orderBy('timestamp', 'asc') aquí porque es un solo campo y ayuda a mantener el orden de inserción si es necesario.
                 const q = query(collection(window.db, window.QUIZ_QUESTIONS_COLLECTION_PATH), orderBy('timestamp', 'asc'));
                 const snapshot = await window.getDocs(q);
                 
@@ -598,6 +605,8 @@
         }
         
         window.addQuestion = async function() {
+            if (!window.isFirebaseReady) return; 
+            
             const text = document.getElementById('new-q-text').value.trim();
             const answers = [
                 document.getElementById('new-q-ans0').value.trim(),
@@ -611,6 +620,7 @@
             errorElement.classList.add('hidden');
 
             if (!text || answers.some(a => !a)) {
+                errorElement.textContent = "Error al guardar. Asegúrate de llenar el texto y las 4 opciones.";
                 errorElement.classList.remove('hidden');
                 return;
             }
@@ -642,7 +652,7 @@
                 errorElement.textContent = "Error al guardar: " + e.message;
                 errorElement.classList.remove('hidden');
                 errorElement.classList.add('text-red-400');
-                errorElement.classList.remove('text-green-400');
+                errorElement.classList.remove('text-green-440');
             }
         }
 
@@ -653,6 +663,7 @@
                 "Eliminar",
                 async (confirmed) => {
                     if (!confirmed) return;
+                    if (!window.isFirebaseReady) return; 
                     
                     try {
                         const docRef = doc(window.db, window.QUIZ_QUESTIONS_COLLECTION_PATH, docId);
@@ -663,7 +674,6 @@
                         console.log(`Pregunta ${docId} eliminada.`);
                     } catch (e) {
                         console.error("Error al eliminar pregunta:", e);
-                        // NOTA: Usar custom modal en lugar de alert
                         console.error("Error al eliminar la pregunta de la base de datos.");
                     }
                 }
@@ -673,7 +683,7 @@
         // --- GESTIÓN DE CONFIGURACIÓN ---
 
         window.saveSettings = async function() {
-            if (!window.db) return;
+            if (!window.isFirebaseReady) return;
             
             const timerInput = document.getElementById('timer-duration-input');
             const pointsInput = document.getElementById('question-points-input');
@@ -728,10 +738,13 @@
             const csvRows = [];
             
             questions.forEach(q => {
+                // Función de escape simple para CSV
+                const escapeCSV = (str) => `"${String(str).replace(/"/g, '""')}"`;
+
                 const row = [
-                    `"${q.text.replace(/"/g, '""')}"`,
-                    ...q.answers.map(a => `"${a.replace(/"/g, '""')}"`),
-                    q.emoji || '',
+                    escapeCSV(q.text),
+                    ...q.answers.map(escapeCSV),
+                    escapeCSV(q.emoji || ''),
                     q.correctIndex || 0
                 ];
                 csvRows.push(row.join(','));
@@ -769,7 +782,7 @@
                     answers: [ans0, ans1, ans2, ans3],
                     correctIndex: 0, 
                     emoji: emoji && emoji.length < 5 ? emoji : '❓',
-                    timestamp: window.serverTimestamp() // Se añadirá al guardar
+                    timestamp: window.serverTimestamp() 
                 };
                 
                 newQuestions.push(question);
@@ -780,7 +793,6 @@
         window.handleExportQuestions = function() {
             if (QUESTIONS.length === 0) {
                 console.error("No hay preguntas para exportar.");
-                // NOTA: Usar custom modal en lugar de alert
                 return;
             }
             const csv = questionsToCSV(QUESTIONS);
@@ -795,6 +807,12 @@
         }
 
         window.handleImportCSV = function() {
+            if (!window.isFirebaseReady) {
+                document.getElementById('import-status').textContent = "❌ Error: Base de datos no lista.";
+                document.getElementById('import-status').classList.remove('hidden');
+                return;
+            }
+
             const fileInput = document.getElementById('csv-file-input');
             const file = fileInput.files[0];
             const status = document.getElementById('import-status');
@@ -868,7 +886,10 @@
         }
 
         async function resetLeaderboard() {
-            if (!window.db) { console.error("La base de datos de Firebase no está lista."); return; } 
+            if (!window.isFirebaseReady) { 
+                console.error("La base de datos de Firebase no está lista."); 
+                return; 
+            } 
             
             const statusDisplay = document.getElementById('firebase-status');
             statusDisplay.textContent = '⚠️ Reiniciando Leaderboard. Por favor, espera...'; 
@@ -903,6 +924,12 @@
         // --- 5. Lógica del Quiz y Puntuación ---
         
         window.registerPlayer = function() {
+            // Asegurarse de que Firebase está listo antes de empezar
+            if (!window.isFirebaseReady) {
+                document.getElementById('quiz-status-msg').textContent = "Error: Esperando sincronización de Firebase. Intenta de nuevo en un momento.";
+                return;
+            }
+            
             const inputElement = document.getElementById('player-name-input');
             const errorElement = document.getElementById('name-error');
             
@@ -927,6 +954,7 @@
         }
 
         function startGame() {
+            // Llama a initTone antes de que inicie el juego para evitar el error.
             initTone(); 
             score = 0;
             currentQuestionIndex = 0;
@@ -974,6 +1002,7 @@
                 const button = document.createElement('button');
                 button.innerHTML = `<span class="text-xl mr-2">${shapes[index]}</span> ${answer.text}`;
                 button.className = `answer-button ${colors[index]} text-white font-bold p-4 rounded-xl text-left shadow-md transform transition duration-150`;
+                // Se usa el texto correcto para la comprobación en el evento onClick
                 button.onclick = () => handleAnswer(answer.isCorrect, button, originalAnswers.indexOf(correctText));
                 answersGrid.appendChild(button);
             });
@@ -1024,6 +1053,7 @@
 
             let correctAnswerButton = null;
             allButtons.forEach(button => {
+                // Se comprueba si el texto del botón contiene la respuesta correcta (limpia de emoji/forma)
                 if (button.textContent.includes(correctText)) {
                     correctAnswerButton = button;
                 }
@@ -1068,46 +1098,69 @@
             document.getElementById('final-score').textContent = score;
             document.getElementById('player-name-final').textContent = playerName; 
             showScreen('results-screen');
-            savePlayerScore(); 
-            loadLeaderboard(); 
+            // Guardar y cargar Leaderboard SOLO si Firebase está listo
+            if (window.isFirebaseReady) {
+                savePlayerScore(); 
+                loadLeaderboard(); 
+            } else {
+                document.getElementById('leaderboard-list').innerHTML = '<p class="text-red-400">No se puede cargar la tabla de clasificación (DB no lista).</p>';
+            }
         }
 
         // --- 6. Lógica de Puntuación Alta (Firestore) ---
-
-        const PLAYER_SCORES_COLLECTION = window.PLAYER_SCORES_COLLECTION_PATH; 
 
         window.loadLeaderboard = async function() {
             const leaderboardList = document.getElementById('leaderboard-list');
             leaderboardList.innerHTML = '<p class="text-gray-400">Cargando mejores puntuaciones...</p>'; 
 
-            if (!window.db) {
+            // Se asegura de que Firebase esté listo antes de consultar.
+            if (!window.isFirebaseReady) {
                  leaderboardList.innerHTML = '<p class="text-red-400">Error: Base de datos no disponible.</p>';
                  return;
             } 
             
             try {
-                // Consulta el leaderboard, sincronizando los datos en tiempo real
+                // CONSULTA FIRESTORE SIN ORDER BY PARA EVITAR EL ERROR DE INDEXACIÓN
                 const q = query(
-                    collection(window.db, PLAYER_SCORES_COLLECTION),
-                    window.orderBy('score', 'desc'),
-                    window.orderBy('timestamp', 'asc'), 
-                    window.limit(10)
+                    collection(window.db, window.PLAYER_SCORES_COLLECTION_PATH)
+                    // Eliminamos orderBy para evitar el error de índice
                 );
 
                 const querySnapshot = await window.getDocs(q);
                 
+                let scoresArray = [];
+                // 1. Convertir snapshot a array
+                querySnapshot.forEach(doc => {
+                    scoresArray.push(doc.data()); 
+                });
+                
+                // 2. Ordenar en memoria (JavaScript): Primero por score (desc), luego por timestamp (asc para desempate)
+                scoresArray.sort((a, b) => {
+                    // Puntuación (descendente)
+                    if (b.score !== a.score) {
+                        return b.score - a.score;
+                    }
+                    // Desempate por timestamp (ascendente - el más rápido/antiguo gana)
+                    // Usamos el campo .seconds del objeto Timestamp de Firestore
+                    const timeA = a.timestamp?.seconds || 0;
+                    const timeB = b.timestamp?.seconds || 0;
+                    return timeA - timeB;
+                });
+
+                // 3. Aplicar el límite (top 10)
+                const topScores = scoresArray.slice(0, 10);
+                
                 let htmlContent = '';
                 
-                if (querySnapshot.empty) {
+                if (topScores.length === 0) {
                     htmlContent = '<p class="text-gray-400">Sé el primero en jugar y registrar tu puntuación.</p>';
                 } else {
-                    querySnapshot.forEach((doc, index) => {
-                        const data = doc.data();
+                    topScores.forEach((data, index) => {
                         const rank = index + 1;
                         const rankColor = rank === 1 ? 'text-yellow-400' : rank === 2 ? 'text-gray-300' : rank === 3 ? 'text-amber-600' : 'text-gray-100';
                         
                         // Resaltar la puntuación del jugador actual si es el mismo usuario y nombre/puntuación
-                        const highlightClass = data.userId === window.userId && data.playerName === playerName && data.score === score ? 'bg-indigo-700 p-2 rounded-lg font-bold' : 'p-2';
+                        const highlightClass = data.userId === window.userId && data.playerName === playerName ? 'bg-indigo-700 p-2 rounded-lg font-bold' : 'p-2';
 
                         htmlContent += `
                             <div class="flex justify-between items-center ${highlightClass} transition duration-150">
@@ -1123,18 +1176,19 @@
 
             } catch (e) {
                 console.error("Error al cargar la tabla de clasificación:", e);
-                leaderboardList.innerHTML = '<p class="text-red-400">Error: Base de datos no disponible.</p>';
+                leaderboardList.innerHTML = '<p class="text-red-400">Error al cargar la tabla de clasificación. Consulta la consola.</p>';
             }
         }
 
         function savePlayerScore() {
-            if (!window.db || !window.userId || !playerName || !window.serverTimestamp) {
-                console.warn("No se puede guardar la puntuación. Faltan datos (DB, ID de Usuario, Nombre o serverTimestamp).");
+            // Se asegura de que Firebase esté listo antes de guardar.
+            if (!window.isFirebaseReady || !playerName) {
+                console.warn("No se puede guardar la puntuación. Firebase no está listo o falta el nombre.");
                 return;
             }
 
             try {
-                const collectionRef = collection(window.db, PLAYER_SCORES_COLLECTION);
+                const collectionRef = collection(window.db, window.PLAYER_SCORES_COLLECTION_PATH);
                 
                 const scoreData = {
                     score: score,
@@ -1159,6 +1213,14 @@
         
         // Llamada inicial al cargar la ventana
         window.onload = () => {
+             // 1. Inicia Firebase
+             if (window.initFirebase) {
+                window.initFirebase();
+             } else {
+                // Esto ocurriría si el módulo no se ha cargado aún
+                console.error("initFirebase no está definido. Esperando a la carga del módulo.");
+             }
+             // 2. Muestra la pantalla de inicio
              showScreen('start-screen'); 
         };
 
