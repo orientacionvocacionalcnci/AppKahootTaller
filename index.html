@@ -34,6 +34,18 @@
             background-color: #e53e3e !important; /* Rojo oscuro */
             animation: shake 0.5s;
         }
+        /* Estilos para el spinner de carga */
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-left-color: #e2e8f0;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
         @keyframes pulse-correct {
             0%, 100% { transform: scale(1); }
             50% { transform: scale(1.03); }
@@ -47,10 +59,10 @@
 
     <!-- Importar Firebase y librerías de sonido (Módulo) -->
     <script type="module">
+        // Importaciones necesarias para Firebase y Tone.js
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        // Importamos serverTimestamp para guardar la hora del servidor correctamente
-        import { getFirestore, doc, setDoc, getDoc, collection, query, limit, getDocs, addDoc, orderBy, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, query, limit, getDocs, addDoc, orderBy, serverTimestamp, deleteDoc, runTransaction, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import * as Tone from "https://cdn.jsdelivr.net/npm/tone@14.7.58/build/Tone.js";
 
         // Exponer módulos clave al ámbito global para el script principal
@@ -71,45 +83,42 @@
         window.addDoc = addDoc; 
         window.orderBy = orderBy; 
         window.serverTimestamp = serverTimestamp; 
+        window.deleteDoc = deleteDoc;
+        window.runTransaction = runTransaction;
+        window.writeBatch = writeBatch;
         
-        // --- 1. CONFIGURACIÓN DE FIREBASE ACTUALIZADA ---
-        // Configuración proporcionada por el usuario como respaldo (fallback)
-        const USER_FIREBASE_CONFIG = {
-            apiKey: "AIzaSyB_MWIOKXfn0oGsT9i6WKYmLYCzVDwQRm8",
-            authDomain: "appkahoottaller.firebaseapp.com",
-            projectId: "appkahoottaller",
-            storageBucket: "appkahoottaller.firebasestorage.app",
-            messagingSenderId: "564353351189",
-            appId: "1:564353351189:web:0311919a72a7a3c55f181c",
-            measurementId: "G-HTRHMNV4BG"
-        };
-        
-        // Priorizamos la configuración de Firebase proporcionada por el entorno (__firebase_config) 
-        // para garantizar la compatibilidad con la autenticación Canvas.
+        // --- 1. CONFIGURACIÓN DE FIREBASE (Sincronización de Base de Datos) ---
+        // La configuración de Firebase (como tu apiKey, projectId, etc.) se carga automáticamente
+        // del entorno a través de la variable __firebase_config.
         const ENVIRONMENT_CONFIG = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-        const FIREBASE_CONFIG = ENVIRONMENT_CONFIG || USER_FIREBASE_CONFIG;
+        const FIREBASE_CONFIG = ENVIRONMENT_CONFIG; 
         
-        // NOTA: Para las rutas de Firestore (ej. /artifacts/{appId}/...), 
-        // priorizamos el __app_id del entorno, o usamos el projectId del usuario como alternativa.
-        const appIdForPaths = typeof __app_id !== 'undefined' ? __app_id : FIREBASE_CONFIG.projectId;
+        const appIdForPaths = typeof __app_id !== 'undefined' ? __app_id : 'default-quiz-app';
         const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 
-        // --- 2. DEFINICIÓN DE LA RUTA PÚBLICA DE FIRESTORE ---
-        // Se establece la ruta completa de la colección pública para el Leaderboard
+        // --- 2. DEFINICIÓN DE RUTAS PÚBLICAS DE FIRESTORE (Datos Compartidos) ---
+        // Estas rutas son para datos públicos/compartidos (preguntas, leaderboard)
         window.PLAYER_SCORES_COLLECTION_PATH = `/artifacts/${appIdForPaths}/public/data/player_scores`;
-
+        window.QUIZ_QUESTIONS_COLLECTION_PATH = `/artifacts/${appIdForPaths}/public/data/questions`; 
+        window.QUIZ_SETTINGS_DOC_PATH = `/artifacts/${appIdForPaths}/public/data/settings/config`; 
 
         let db, auth, userId = 'anon';
 
         // Inicialización y autenticación de Firebase
         window.initFirebase = async () => {
+            if (!FIREBASE_CONFIG) {
+                console.error("Firebase config is missing.");
+                document.getElementById('firebase-status').textContent = '❌ Error: Configuración de Firebase no encontrada.';
+                return;
+            }
             try {
-                // Usamos la configuración combinada (priorizando la del entorno) para inicializar la app.
+                // Inicializa la app de Firebase con la configuración del entorno
                 const app = initializeApp(FIREBASE_CONFIG);
+                // Obtiene la instancia de Firestore (la base de datos)
                 db = getFirestore(app);
                 auth = getAuth(app);
 
-                // Autenticación con token inicial (si existe, es una cadena y no está vacía) o anónima
+                // Autentica automáticamente al usuario
                 if (initialAuthToken && typeof initialAuthToken === 'string' && initialAuthToken.length > 0) {
                     await signInWithCustomToken(auth, initialAuthToken);
                 } else {
@@ -119,11 +128,14 @@
                 onAuthStateChanged(auth, (user) => {
                     if (user) {
                         userId = user.uid;
-                        document.getElementById('firebase-status').textContent = `✅ Usuario ID: ${userId.substring(0, 8)}...`;
+                        document.getElementById('firebase-status').textContent = `✅ Sincronización OK. Usuario ID: ${userId.substring(0, 8)}...`; 
                         console.log('Firebase initialized and authenticated. User ID:', userId);
-                        window.db = db;
+                        // Exponer al ámbito global
+                        window.db = db; // Usado para interactuar con Firestore
                         window.auth = auth;
                         window.userId = userId;
+                        // Carga los datos del quiz desde Firestore
+                        loadQuizData();
                     } else {
                         console.error("User not signed in.");
                         document.getElementById('firebase-status').textContent = '❌ Error de autenticación';
@@ -131,7 +143,6 @@
                 });
             } catch (error) {
                 console.error("Error initializing Firebase:", error);
-                // Si la autenticación falla, mostramos el error específico
                 document.getElementById('firebase-status').textContent = `❌ Error al cargar Firebase: ${error.code || error.message}`;
             }
         };
@@ -147,143 +158,749 @@
         <!-- Estado de Firebase (para debug/información) -->
         <p id="firebase-status" class="text-xs text-center mb-2 text-gray-500">Cargando Firebase...</p>
 
-        <!-- Cabecera del Juego -->
-        <div class="flex justify-between items-center mb-6 p-4 rounded-lg bg-gray-700 kahoot-card">
+        <!-- Cabecera del Juego (Visible solo en modo Quiz) -->
+        <div id="quiz-header" class="flex justify-between items-center mb-6 p-4 rounded-lg bg-gray-700 kahoot-card hidden">
             <div id="score-display" class="text-xl font-bold">Puntos: 0</div>
-            <div id="timer-display" class="text-4xl font-black text-yellow-300">15</div>
+            <div id="timer-display" class="text-4xl font-black text-yellow-300">30</div>
             <div id="question-counter" class="text-xl font-bold">1 / 4</div>
         </div>
 
-        <!-- Contenedores de Pantallas (Controlados por JS) -->
+        <!-- PANTALLA 1: INICIO DE JUEGO / REGISTRO DE JUGADOR -->
         <div id="start-screen" class="kahoot-card p-8 rounded-xl text-center">
             <h1 class="text-5xl font-extrabold mb-4 text-pink-400">🧠 Quiz de Repaso 💭</h1>
-            <p class="text-lg mb-6 text-gray-300">¡Ingresa tu nombre para empezar a competir!</p>
+            <p id="quiz-status-msg" class="text-lg mb-6 text-gray-300">Cargando preguntas y configuración...</p>
 
-            <!-- Área de Registro de Jugador -->
             <input type="text" id="player-name-input" placeholder="Tu Nombre o Nickname" class="w-full p-3 mb-4 rounded-lg text-lg text-gray-900 bg-gray-200 focus:outline-none focus:ring-2 focus:ring-pink-500"/>
             <p id="name-error" class="text-red-400 text-sm mb-4 hidden">Por favor, introduce un nombre válido.</p>
             
-            <button onclick="registerPlayer()" class="bg-green-500 hover:bg-green-600 text-white font-bold py-4 px-8 rounded-full shadow-lg transform hover:scale-105 transition duration-200">
+            <button id="start-game-button" onclick="registerPlayer()" class="bg-green-500 hover:bg-green-600 text-white font-bold py-4 px-8 rounded-full shadow-lg transform hover:scale-105 transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
                 🚀 ¡Registrar y Empezar!
             </button>
         </div>
 
+        <!-- PANTALLA 2: QUIZ ACTIVO -->
         <div id="quiz-screen" class="hidden">
-            <!-- Área de la Pregunta -->
             <div id="question-area" class="kahoot-card p-8 rounded-xl mb-4 min-h-[150px] flex items-center justify-center">
                 <p id="question-text" class="text-3xl font-bold text-center text-white"></p>
             </div>
-            
-            <!-- Área de las Respuestas (Grid de 2x2) -->
-            <div id="answers-grid" class="grid grid-cols-2 gap-4">
-                <!-- Los botones se insertarán aquí por JavaScript -->
-            </div>
+            <div id="answers-grid" class="grid grid-cols-2 gap-4"></div>
         </div>
 
+        <!-- PANTALLA 3: FEEDBACK DE RESPUESTA -->
         <div id="feedback-screen" class="hidden kahoot-card p-12 rounded-xl text-center min-h-[300px] flex flex-col items-center justify-center">
             <p id="feedback-emoji" class="text-6xl mb-4"></p>
             <p id="feedback-text" class="text-3xl font-bold"></p>
             <p id="points-awarded" class="text-xl mt-2 text-gray-300"></p>
         </div>
 
+        <!-- PANTALLA 4: RESULTADOS Y LEADERBOARD -->
         <div id="results-screen" class="hidden kahoot-card p-8 rounded-xl text-center">
             <h2 class="text-4xl font-extrabold mb-4 text-indigo-400">🎉 ¡Resultados de <span id="player-name-final" class="text-yellow-300"></span>! 🎉</h2>
-            <p class="text-xl font-semibold mb-2">Tu Puntuación Final:</p>
             <p class="text-6xl font-black text-green-400 mb-8" id="final-score">0</p>
             
-            <!-- Tabla de Clasificación Global -->
             <div class="mb-8 p-4 bg-gray-600 rounded-lg">
                 <p class="text-2xl font-bold mb-3 text-pink-300">🏆 Tabla de Clasificación Global</p>
                 <div id="leaderboard-list" class="text-left space-y-2">
-                    <!-- La lista se genera aquí por JavaScript -->
                     <p class="text-gray-400">Cargando mejores puntuaciones...</p>
                 </div>
             </div>
 
-            <button onclick="window.location.reload()" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-4 px-8 rounded-full shadow-lg transform hover:scale-105 transition duration-200">
+            <button onclick="showScreen('start-screen'); document.getElementById('quiz-header').classList.add('hidden');" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-4 px-8 rounded-full shadow-lg transform hover:scale-105 transition duration-200">
                 🔄 Jugar de Nuevo
             </button>
+        </div>
+        
+        <!-- PANTALLA 5: ACCESO ADMINISTRADOR (LOGIN) -->
+        <div id="admin-login-screen" class="hidden kahoot-card p-8 rounded-xl text-center">
+            <h2 class="text-4xl font-extrabold mb-6 text-red-400">🔑 Acceso a Administración</h2>
+            <input type="password" id="admin-password-input" placeholder="Contraseña Admin (123)" class="w-full p-3 mb-4 rounded-lg text-lg text-gray-900 bg-gray-200 focus:outline-none focus:ring-2 focus:ring-red-500"/>
+            <p id="admin-error" class="text-red-400 text-sm mb-4 hidden">Contraseña incorrecta.</p>
+
+            <button onclick="loginAdmin()" class="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transform hover:scale-105 transition duration-200 w-full mb-3">
+                Entrar al Panel
+            </button>
+            <button onclick="showScreen('start-screen')" class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-8 rounded-full w-full">
+                Volver al Inicio
+            </button>
+        </div>
+
+        <!-- PANTALLA 6: PANEL DE ADMINISTRACIÓN (DASHBOARD) -->
+        <div id="admin-dashboard-screen" class="hidden kahoot-card p-8 rounded-xl">
+            <h2 class="text-4xl font-extrabold mb-6 text-green-400 text-center">⚙️ Panel de Administración</h2>
+            
+            <div class="space-y-4">
+                <button onclick="showAdminQuestions()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-4 rounded-lg shadow-md w-full text-left flex justify-between items-center">
+                    Gestionar Preguntas
+                    <span>→</span>
+                </button>
+                <button onclick="showAdminSettings()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-4 rounded-lg shadow-md w-full text-left flex justify-between items-center">
+                    Configuración (Tiempo/Puntos)
+                    <span>⏱️</span>
+                </button>
+                <button onclick="showCSVScreen()" class="bg-teal-600 hover:bg-teal-700 text-white font-bold py-4 px-4 rounded-lg shadow-md w-full text-left flex justify-between items-center">
+                    Importar / Exportar CSV
+                    <span>⬆️/⬇️</span>
+                </button>
+                <button onclick="showResetModal()" class="bg-red-600 hover:bg-red-700 text-white font-bold py-4 px-4 rounded-lg shadow-md w-full text-left flex justify-between items-center">
+                    Reiniciar Leaderboard
+                    <span>🗑️</span>
+                </button>
+            </div>
+            <button onclick="showScreen('start-screen'); isAdmin = false;" class="mt-6 bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 rounded-lg w-full">
+                Cerrar Sesión / Volver al Inicio
+            </button>
+        </div>
+
+        <!-- PANTALLA 7: GESTIÓN DE PREGUNTAS -->
+        <div id="admin-questions-screen" class="hidden kahoot-card p-8 rounded-xl">
+            <h2 class="text-3xl font-extrabold mb-4 text-yellow-400">📝 Editar Preguntas</h2>
+
+            <!-- Botón de Volver -->
+            <button onclick="showScreen('admin-dashboard-screen')" class="text-blue-400 hover:text-blue-200 mb-4 flex items-center">
+                ← Volver al Dashboard
+            </button>
+            
+            <!-- Lista de Preguntas Actuales -->
+            <div id="current-questions-list" class="space-y-4 mb-6 p-4 border border-gray-600 rounded-lg max-h-60 overflow-y-auto">
+                <p class="text-gray-400">Cargando preguntas...</p>
+            </div>
+
+            <h3 class="text-2xl font-bold mb-3 text-pink-400">Añadir Nueva Pregunta</h3>
+            
+            <div id="new-question-form" class="space-y-3">
+                <input type="text" id="new-q-text" placeholder="Texto de la Pregunta" class="w-full p-2 rounded text-gray-900 bg-gray-300"/>
+                <input type="text" id="new-q-ans0" placeholder="Opción 1 (Correcta)" class="w-full p-2 rounded bg-green-200 text-gray-900"/>
+                <input type="text" id="new-q-ans1" placeholder="Opción 2" class="w-full p-2 rounded text-gray-900 bg-gray-300"/>
+                <input type="text" id="new-q-ans2" placeholder="Opción 3" class="w-full p-2 rounded text-gray-900 bg-gray-300"/>
+                <input type="text" id="new-q-ans3" placeholder="Opción 4" class="w-full p-2 rounded text-gray-900 bg-gray-300"/>
+                <input type="text" id="new-q-emoji" placeholder="Emoji (ej. 🧠, opcional)" class="w-full p-2 rounded text-gray-900 bg-gray-300"/>
+                <p class="text-sm text-gray-400">La primera opción (Opción 1, índice 0) siempre es la correcta por defecto.</p>
+                <p id="question-save-error" class="text-red-400 text-sm hidden">Error al guardar. Asegúrate de llenar el texto y las 4 opciones.</p>
+                
+                <button onclick="addQuestion()" class="bg-green-500 hover:bg-green-600 text-white font-bold py-3 rounded-lg w-full">
+                    💾 Guardar Nueva Pregunta
+                </button>
+            </div>
+        </div>
+        
+        <!-- PANTALLA 8: CONFIGURACIÓN DE JUEGO (TIEMPO Y PUNTOS) -->
+        <div id="admin-settings-screen" class="hidden kahoot-card p-8 rounded-xl">
+            <h2 class="text-3xl font-extrabold mb-4 text-blue-400">⏱️ Configuración de Juego</h2>
+
+            <button onclick="showScreen('admin-dashboard-screen')" class="text-blue-400 hover:text-blue-200 mb-6 flex items-center">
+                ← Volver al Dashboard
+            </button>
+
+            <div class="space-y-6">
+                <div>
+                    <label for="timer-duration-input" class="block text-lg font-medium mb-2 text-gray-300">Duración del Cronómetro (segundos)</label>
+                    <input type="number" id="timer-duration-input" min="5" max="60" class="w-full p-3 rounded-lg text-xl text-gray-900 bg-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                    <p class="text-sm text-gray-400 mt-1">Tiempo que tienen los jugadores para responder cada pregunta.</p>
+                </div>
+                
+                <div>
+                    <label for="question-points-input" class="block text-lg font-medium mb-2 text-gray-300">Puntos Base por Respuesta Correcta</label>
+                    <input type="number" id="question-points-input" min="100" class="w-full p-3 rounded-lg text-xl text-gray-900 bg-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+                    <p class="text-sm text-gray-400 mt-1">Puntuación mínima. La puntuación total varía según la velocidad.</p>
+                </div>
+
+                <button onclick="saveSettings()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg w-full flex items-center justify-center">
+                    <span id="settings-loading-icon" class="hidden spinner mr-2"></span>
+                    <span id="settings-button-text">💾 Guardar Configuración</span>
+                </button>
+                <p id="settings-status" class="text-green-400 text-center hidden"></p>
+            </div>
+        </div>
+
+        <!-- PANTALLA 9: CSV IMPORTAR/EXPORTAR -->
+        <div id="admin-csv-screen" class="hidden kahoot-card p-8 rounded-xl">
+            <h2 class="text-3xl font-extrabold mb-4 text-teal-400">⬆️/⬇️ Datos CSV</h2>
+
+            <button onclick="showScreen('admin-dashboard-screen')" class="text-blue-400 hover:text-blue-200 mb-6 flex items-center">
+                ← Volver al Dashboard
+            </button>
+            
+            <div class="space-y-6">
+                <div class="p-4 bg-gray-700 rounded-lg">
+                    <h3 class="text-xl font-bold mb-3">Exportar Preguntas</h3>
+                    <p class="mb-3 text-sm text-gray-400">Exporta las preguntas actuales (total: <span id="export-count">0</span>) a un archivo CSV.</p>
+                    <button onclick="handleExportQuestions()" class="bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 rounded-lg w-full flex items-center justify-center">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                        Descargar CSV
+                    </button>
+                </div>
+
+                <div class="p-4 bg-gray-700 rounded-lg">
+                    <h3 class="text-xl font-bold mb-3">Importar Preguntas</h3>
+                    <p class="mb-3 text-sm text-gray-400">Añade nuevas preguntas desde un archivo CSV. <strong class="text-yellow-300">Formato: Texto, Opción0(Correcta), Opción1, Opción2, Opción3, Emoji.</strong></p>
+                    <input type="file" id="csv-file-input" accept=".csv" class="w-full text-sm text-gray-300 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-gray-500 file:text-white hover:file:bg-gray-600"/>
+                    <button onclick="handleImportCSV()" class="mt-4 bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 rounded-lg w-full flex items-center justify-center">
+                        <span id="import-loading-icon" class="hidden spinner mr-2"></span>
+                        <span id="import-button-text">⬆️ Subir e Importar</span>
+                    </button>
+                    <p id="import-status" class="text-red-400 text-center mt-2 hidden"></p>
+                </div>
+            </div>
         </div>
 
     </div>
 
+    <!-- Botón de Acceso a Admin (siempre visible fuera del admin o quiz) -->
+    <div id="admin-access-button" class="fixed bottom-4 right-4 z-10">
+        <button onclick="showScreen('admin-login-screen')" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transform hover:scale-105 transition duration-200">
+            ⚙️ Acceso Admin
+        </button>
+    </div>
+
+    <!-- Modal de Confirmación (genérico, para reinicio y borrado) -->
+    <div id="confirmation-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-70 hidden">
+        <div class="kahoot-card p-6 rounded-xl w-full max-w-sm text-center">
+            <h3 id="modal-title" class="text-2xl font-bold mb-4 text-red-400"></h3>
+            <p id="modal-message" class="mb-4 text-gray-300"></p>
+            
+            <div class="flex justify-between space-x-3">
+                <button onclick="window.currentModalCallback(false)" class="flex-1 bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 rounded-lg transition duration-150">Cancelar</button>
+                <button id="modal-confirm-button" onclick="window.currentModalCallback(true)" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg transition duration-150">Confirmar</button>
+            </div>
+        </div>
+    </div>
+
+
     <!-- Script de la Aplicación -->
     <script>
-        // --- 1. Definición de Preguntas y Opciones ---
-        const QUESTIONS = [
-            {
-                text: "¿Cómo se llama el estrés que es intenso, pero de corta duración, y puede incluso ser motivador?",
-                answers: ["Estrés Crónico", "Estrés Agudo", "Burnout", "Ansiedad Generalizada"],
-                correctIndex: 1, // Estrés Agudo
-                emoji: "⚡️"
-            },
-            {
-                text: "La Ansiedad es una respuesta emocional que anticipa una amenaza futura. ¿Cuál es su principal diferencia con el Miedo?",
-                answers: ["Es siempre menos intensa.", "Se enfoca en un peligro vago o futuro.", "Solo tiene síntomas físicos.", "Solo ocurre en personas con fobias."],
-                correctIndex: 1, // Se enfoca en un peligro vago o futuro.
-                emoji: "🕰️"
-            },
-            {
-                text: "¿Cuál de estos es un síntoma **físico** común del estrés prolongado?",
-                answers: ["Tristeza persistente", "Dificultad para concentrarse", "Tensión muscular o dolores de cabeza", "Irritabilidad"],
-                correctIndex: 2, // Tensión muscular o dolores de cabeza
-                emoji: "💪"
-            },
-            {
-                text: "El estrés Crónico se caracteriza por ser persistente y agotador. ¿A qué condición psicológica puede conducir si no se gestiona?",
-                answers: ["Felicidad Extrema", "Síndrome de Diógenes", "Apatía y Agotamiento ('Burnout')", "Memoria Fotográfica"],
-                correctIndex: 2, // Apatía y Agotamiento ('Burnout')
-                emoji: " exhaustion"
-            }
-        ];
-
-        // --- 2. Variables de Estado del Juego ---
+        // --- 1. Definición Inicial y Variables de Estado ---
+        let QUESTIONS = []; 
         let currentQuestionIndex = 0;
         let score = 0;
-        let timer = 15;
+        let timer = 30; // Valor inicial
         let countdownInterval;
         let isQuestionActive = false;
-        const TIME_LIMIT = 15; // Segundos
-        let playerName = ''; // Nuevo: Almacenar el nombre del jugador
+        let playerName = ''; 
+        let isAdmin = false;
+        const ADMIN_PASSWORD = '123';
+        
+        // Configuración dinámica del juego
+        let gameConfig = { 
+            timerDuration: 30, // Default: 30 segundos
+            questionPoints: 1000 // Default: 1000 puntos
+        }; 
 
-        // --- 3. Inicialización de Sonidos (Tone.js) ---
+        // --- 2. Inicialización de Sonidos (Tone.js) ---
         let synth;
         let sounds = {};
         let isToneInitialized = false;
 
-        // Inicializa Tone.js solo cuando se llama (al empezar el juego)
-        function initTone() {
-            if (isToneInitialized) return;
+        async function initTone() {
+            if (isToneInitialized || !window.Tone) return;
             
-            if (!window.Tone) {
-                console.error("Tone.js library is not loaded. Cannot initialize sounds.");
-                return;
+            try {
+                // Activa el AudioContext.
+                await window.Tone.start(); 
+                
+                const PolySynth = window.Tone.PolySynth;
+                const Synth = window.Tone.Synth;
+
+                synth = new PolySynth(Synth, {
+                    oscillator: { type: "square" },
+                    envelope: { release: 0.1 }
+                }).toDestination();
+
+                sounds = {
+                    correct: () => { synth.triggerAttackRelease(["C5", "E5", "G5"], "8n"); },
+                    incorrect: () => { synth.triggerAttackRelease("C3", "4n"); },
+                    timerTick: () => { synth.triggerAttackRelease("A2", "32n"); },
+                    gameOver: () => { synth.triggerAttackRelease(["C4", "G3", "C3"], "1n", "+0.1"); }
+                };
+                isToneInitialized = true;
+            } catch (error) {
+                console.error("Error during Tone.js initialization:", error);
+            }
+        }
+        
+        // --- 3. Funciones de Control de Pantalla y UI ---
+        
+        function showScreen(screenId) {
+            const screens = [
+                'start-screen', 'quiz-screen', 'feedback-screen', 'results-screen', 
+                'admin-login-screen', 'admin-dashboard-screen', 'admin-questions-screen',
+                'admin-settings-screen', 'admin-csv-screen'
+            ];
+            screens.forEach(id => {
+                const element = document.getElementById(id);
+                if (element) {
+                    element.classList.add('hidden');
+                }
+            });
+            document.getElementById(screenId).classList.remove('hidden');
+
+            // Mostrar/Ocultar cabecera del quiz y botón de admin
+            const quizHeader = document.getElementById('quiz-header');
+            const adminButton = document.getElementById('admin-access-button');
+            
+            if (screenId === 'quiz-screen' || screenId === 'feedback-screen') {
+                quizHeader.classList.remove('hidden');
+                adminButton.classList.add('hidden');
+            } else {
+                quizHeader.classList.add('hidden');
+                // Ocultar el botón de Admin si estamos en una pantalla de Admin
+                if (screenId.startsWith('admin-') && screenId !== 'admin-login-screen') {
+                    adminButton.classList.add('hidden');
+                } else {
+                    adminButton.classList.remove('hidden');
+                }
             }
             
-            // Destructurar explícitamente los constructores para evitar TypeError
-            const { PolySynth, Synth } = window.Tone;
-
-            if (!PolySynth || !Synth) {
-                console.error("Tone.js PolySynth or Synth constructors are not available.");
-                return;
+            // Si volvemos a la pantalla de inicio, recargamos la configuración por si cambió
+            if (screenId === 'start-screen') {
+                loadQuizData(); 
             }
-
-            // Creación del sintetizador y sonidos
-            synth = new PolySynth(Synth, {
-                oscillator: { type: "square" },
-                envelope: { release: 0.1 }
-            }).toDestination();
-
-            sounds = {
-                correct: () => { synth.triggerAttackRelease(["C5", "E5", "G5"], "8n"); },
-                incorrect: () => { synth.triggerAttackRelease("C3", "4n"); },
-                timerTick: () => { synth.triggerAttackRelease("A2", "32n"); },
-                gameOver: () => { synth.triggerAttackRelease(["C4", "G3", "C3"], "1n", "+0.1"); }
-            };
-            isToneInitialized = true;
         }
 
-        // --- 4. Funciones de Control del Flujo del Juego y Registro ---
+        function updateUI() {
+            document.getElementById('question-counter').textContent = `${currentQuestionIndex + 1} / ${QUESTIONS.length}`;
+            document.getElementById('score-display').textContent = `Puntos: ${score}`;
+        }
+        
+        // --- 4. Lógica de Administración (Login, CRUD, Configuración) ---
+        
+        // Función para mostrar el modal de confirmación
+        window.showConfirmationModal = function(title, message, confirmButtonText, callback) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-message').textContent = message;
+            document.getElementById('modal-confirm-button').textContent = confirmButtonText;
+            window.currentModalCallback = (result) => {
+                document.getElementById('confirmation-modal').classList.add('hidden');
+                callback(result);
+            };
+            document.getElementById('confirmation-modal').classList.remove('hidden');
+        }
+
+        window.loginAdmin = function() {
+            const inputElement = document.getElementById('admin-password-input');
+            const errorElement = document.getElementById('admin-error');
+            
+            if (inputElement.value === ADMIN_PASSWORD) {
+                isAdmin = true;
+                errorElement.classList.add('hidden');
+                inputElement.value = ''; 
+                showScreen('admin-dashboard-screen');
+            } else {
+                errorElement.classList.remove('hidden');
+                inputElement.classList.add('border-2', 'border-red-500');
+                setTimeout(() => inputElement.classList.remove('border-2', 'border-red-500'), 1500);
+            }
+        }
+
+        window.showAdminQuestions = function() {
+            if (isAdmin) {
+                showScreen('admin-questions-screen');
+                renderAdminQuestions();
+            }
+        }
+        
+        window.showAdminSettings = function() {
+            if (isAdmin) {
+                // Rellenar inputs con la configuración actual antes de mostrar
+                document.getElementById('timer-duration-input').value = gameConfig.timerDuration;
+                document.getElementById('question-points-input').value = gameConfig.questionPoints;
+                showScreen('admin-settings-screen');
+            }
+        }
+
+        window.showCSVScreen = function() {
+             if (isAdmin) {
+                document.getElementById('export-count').textContent = QUESTIONS.length;
+                showScreen('admin-csv-screen');
+            }
+        }
+
+        // --- CARGA DE DATOS (PREGUNTAS Y CONFIGURACIÓN) ---
+
+        const DEFAULT_SETTINGS = { timerDuration: 30, questionPoints: 1000 };
+
+        async function loadQuizData() {
+            const statusMsg = document.getElementById('quiz-status-msg');
+            const startBtn = document.getElementById('start-game-button');
+            startBtn.disabled = true;
+            
+            // Verificamos que la instancia de Firestore (db) esté disponible, lo que confirma la sincronización.
+            if (!window.db) {
+                statusMsg.textContent = "Error: Base de datos no disponible.";
+                return;
+            }
+
+            try {
+                // 1. Cargar Configuración
+                const configDocRef = doc(window.db, window.QUIZ_SETTINGS_DOC_PATH);
+                const configSnap = await window.getDoc(configDocRef);
+                
+                if (configSnap.exists()) {
+                    gameConfig = { ...DEFAULT_SETTINGS, ...configSnap.data() };
+                } else {
+                    // Inicializar si no existe
+                    await window.setDoc(configDocRef, DEFAULT_SETTINGS);
+                    gameConfig = DEFAULT_SETTINGS;
+                }
+                
+                // Actualizar timer inicial con la configuración cargada
+                document.getElementById('timer-display').textContent = gameConfig.timerDuration;
+                timer = gameConfig.timerDuration;
+
+                // 2. Cargar Preguntas
+                // Accede a la colección de preguntas de la base de datos sincronizada
+                const q = query(collection(window.db, window.QUIZ_QUESTIONS_COLLECTION_PATH), orderBy('timestamp', 'asc'));
+                const snapshot = await window.getDocs(q);
+                
+                QUESTIONS = [];
+                snapshot.forEach(doc => {
+                    QUESTIONS.push({ ...doc.data(), docId: doc.id }); 
+                });
+
+                if (QUESTIONS.length === 0) {
+                    statusMsg.textContent = "¡Cargado! No hay preguntas. Usa el Panel Admin para añadir.";
+                } else {
+                    statusMsg.textContent = `¡Cargado! ${QUESTIONS.length} preguntas disponibles.`;
+                }
+                
+                startBtn.disabled = (QUESTIONS.length === 0);
+
+            } catch (e) {
+                console.error("Error al cargar datos del quiz:", e);
+                statusMsg.textContent = `Error al cargar datos: ${e.message}.`;
+                startBtn.disabled = true;
+            }
+        }
+        
+        // --- GESTIÓN DE PREGUNTAS EN FIRESTORE ---
+
+        function renderAdminQuestions() {
+            const list = document.getElementById('current-questions-list');
+            list.innerHTML = ''; 
+            
+            if (QUESTIONS.length === 0) {
+                list.innerHTML = '<p class="text-gray-400">No hay preguntas cargadas.</p>';
+                return;
+            }
+
+            QUESTIONS.forEach((q, index) => {
+                const correctText = q.answers[q.correctIndex || 0];
+                const item = document.createElement('div');
+                item.className = 'p-3 bg-gray-600 rounded-lg flex justify-between items-start';
+                item.innerHTML = `
+                    <div class="flex-1 mr-4">
+                        <p class="font-bold text-yellow-300">${index + 1}. ${q.text}</p>
+                        <p class="text-sm text-green-300">Respuesta: ${correctText}</p>
+                    </div>
+                    <button onclick="deleteQuestion('${q.docId}')" class="bg-red-500 hover:bg-red-600 text-white p-2 rounded-md text-sm ml-2">🗑️</button>
+                `;
+                list.appendChild(item);
+            });
+        }
+        
+        window.addQuestion = async function() {
+            const text = document.getElementById('new-q-text').value.trim();
+            const answers = [
+                document.getElementById('new-q-ans0').value.trim(),
+                document.getElementById('new-q-ans1').value.trim(),
+                document.getElementById('new-q-ans2').value.trim(),
+                document.getElementById('new-q-ans3').value.trim()
+            ];
+            const emoji = document.getElementById('new-q-emoji').value.trim() || '❓';
+            
+            const errorElement = document.getElementById('question-save-error');
+            errorElement.classList.add('hidden');
+
+            if (!text || answers.some(a => !a)) {
+                errorElement.classList.remove('hidden');
+                return;
+            }
+
+            const newQuestion = {
+                text: text,
+                answers: answers, 
+                correctIndex: 0, // Opción 1 (índice 0) siempre es la correcta
+                emoji: emoji,
+                timestamp: window.serverTimestamp()
+            };
+
+            try {
+                // Sincroniza la nueva pregunta con Firestore
+                await window.addDoc(collection(window.db, window.QUIZ_QUESTIONS_COLLECTION_PATH), newQuestion);
+                
+                // Recargar y actualizar vistas
+                await loadQuizData();
+                renderAdminQuestions();
+
+                // Limpiar formulario
+                document.querySelectorAll('#new-question-form input').forEach(input => input.value = '');
+                errorElement.textContent = "Pregunta guardada exitosamente.";
+                errorElement.classList.remove('hidden');
+                errorElement.classList.remove('text-red-400');
+                errorElement.classList.add('text-green-400');
+            } catch (e) {
+                console.error("Error al añadir pregunta:", e);
+                errorElement.textContent = "Error al guardar: " + e.message;
+                errorElement.classList.remove('hidden');
+                errorElement.classList.add('text-red-400');
+                errorElement.classList.remove('text-green-400');
+            }
+        }
+
+        window.deleteQuestion = function(docId) {
+            window.showConfirmationModal(
+                "Eliminar Pregunta", 
+                "¿Estás seguro de que quieres eliminar esta pregunta? Esta acción es irreversible.",
+                "Eliminar",
+                async (confirmed) => {
+                    if (!confirmed) return;
+                    
+                    try {
+                        const docRef = doc(window.db, window.QUIZ_QUESTIONS_COLLECTION_PATH, docId);
+                        // Sincroniza la eliminación con Firestore
+                        await window.deleteDoc(docRef);
+                        await loadQuizData();
+                        renderAdminQuestions();
+                        console.log(`Pregunta ${docId} eliminada.`);
+                    } catch (e) {
+                        console.error("Error al eliminar pregunta:", e);
+                        // NOTA: Usar custom modal en lugar de alert
+                        console.error("Error al eliminar la pregunta de la base de datos.");
+                    }
+                }
+            );
+        }
+
+        // --- GESTIÓN DE CONFIGURACIÓN ---
+
+        window.saveSettings = async function() {
+            if (!window.db) return;
+            
+            const timerInput = document.getElementById('timer-duration-input');
+            const pointsInput = document.getElementById('question-points-input');
+            const status = document.getElementById('settings-status');
+            const buttonText = document.getElementById('settings-button-text');
+            const loadingIcon = document.getElementById('settings-loading-icon');
+
+            const newTimer = parseInt(timerInput.value, 10);
+            const newPoints = parseInt(pointsInput.value, 10);
+
+            if (isNaN(newTimer) || newTimer < 5 || isNaN(newPoints) || newPoints < 100) {
+                status.textContent = "🚨 Valores no válidos. El tiempo debe ser >= 5s y los puntos >= 100.";
+                status.classList.remove('hidden', 'text-green-400');
+                status.classList.add('text-red-400');
+                return;
+            }
+
+            loadingIcon.classList.remove('hidden');
+            buttonText.textContent = 'Guardando...';
+            status.classList.add('hidden');
+
+            const newConfig = {
+                timerDuration: newTimer,
+                questionPoints: newPoints
+            };
+            
+            try {
+                const configDocRef = doc(window.db, window.QUIZ_SETTINGS_DOC_PATH);
+                // Sincroniza la configuración con Firestore
+                await window.setDoc(configDocRef, newConfig);
+                gameConfig = newConfig; // Actualizar localmente
+                status.textContent = "✅ Configuración guardada con éxito!";
+                status.classList.remove('text-red-400');
+                status.classList.add('text-green-400');
+            } catch (e) {
+                console.error("Error al guardar configuración:", e);
+                status.textContent = "❌ Error al guardar: " + e.message;
+                status.classList.remove('text-green-400');
+                status.classList.add('text-red-400');
+            } finally {
+                loadingIcon.classList.add('hidden');
+                buttonText.textContent = '💾 Guardar Configuración';
+                status.classList.remove('hidden');
+            }
+        }
+
+        // --- GESTIÓN DE CSV ---
+
+        // Helper para convertir el array de preguntas a CSV
+        function questionsToCSV(questions) {
+            const headers = ["Texto", "Opción0 (Correcta)", "Opción1", "Opción2", "Opción3", "Emoji", "Índice Correcto"];
+            const csvRows = [];
+            
+            questions.forEach(q => {
+                const row = [
+                    `"${q.text.replace(/"/g, '""')}"`,
+                    ...q.answers.map(a => `"${a.replace(/"/g, '""')}"`),
+                    q.emoji || '',
+                    q.correctIndex || 0
+                ];
+                csvRows.push(row.join(','));
+            });
+
+            return [headers.join(','), ...csvRows].join('\n');
+        }
+        
+        // Helper para parsear CSV a preguntas
+        function CSVToQuestions(csvText) {
+            const lines = csvText.trim().split('\n');
+            // Ignorar la primera línea si es un encabezado
+            const dataLines = lines[0].toLowerCase().includes('texto') ? lines.slice(1) : lines;
+            const newQuestions = [];
+
+            for (let i = 0; i < dataLines.length; i++) {
+                const line = dataLines[i];
+                if (line.trim() === '') continue;
+
+                // Patrón simple para manejar campos entre comillas
+                const fields = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g) || [];
+
+                if (fields.length < 5) { // Mínimo: Texto, 4 Opciones
+                    throw new Error(`Error en línea ${i + 1}: Se requieren al menos 5 campos (Texto + 4 Opciones).`);
+                }
+                
+                // Des-escapar y limpiar campos
+                const cleanFields = fields.map(f => f.replace(/^"|"$/g, '').replace(/""/g, '"').trim());
+
+                const [text, ans0, ans1, ans2, ans3, emoji, ...rest] = cleanFields;
+                
+                // Por convención, Opción 1 (ans0) es la correcta, index=0
+                const question = {
+                    text: text || 'Pregunta Importada',
+                    answers: [ans0, ans1, ans2, ans3],
+                    correctIndex: 0, 
+                    emoji: emoji && emoji.length < 5 ? emoji : '❓',
+                    timestamp: window.serverTimestamp() // Se añadirá al guardar
+                };
+                
+                newQuestions.push(question);
+            }
+            return newQuestions;
+        }
+
+        window.handleExportQuestions = function() {
+            if (QUESTIONS.length === 0) {
+                console.error("No hay preguntas para exportar.");
+                // NOTA: Usar custom modal en lugar de alert
+                return;
+            }
+            const csv = questionsToCSV(QUESTIONS);
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.setAttribute('href', url);
+            a.setAttribute('download', `quiz_preguntas_${new Date().getTime()}.csv`);
+            a.click();
+            URL.revokeObjectURL(url);
+            console.log(`Exportadas ${QUESTIONS.length} preguntas.`);
+        }
+
+        window.handleImportCSV = function() {
+            const fileInput = document.getElementById('csv-file-input');
+            const file = fileInput.files[0];
+            const status = document.getElementById('import-status');
+            const buttonText = document.getElementById('import-button-text');
+            const loadingIcon = document.getElementById('import-loading-icon');
+
+            status.classList.add('hidden');
+            if (!file) {
+                status.textContent = "🚨 Por favor, selecciona un archivo CSV.";
+                status.classList.remove('hidden');
+                return;
+            }
+
+            loadingIcon.classList.remove('hidden');
+            buttonText.textContent = 'Procesando...';
+
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const csvText = e.target.result;
+                    const newQuestions = CSVToQuestions(csvText);
+
+                    if (newQuestions.length === 0) {
+                        throw new Error("El archivo no contiene preguntas válidas.");
+                    }
+
+                    // Usar Batch para añadir múltiples documentos
+                    const batch = window.writeBatch(window.db);
+                    const questionsCollectionRef = collection(window.db, window.QUIZ_QUESTIONS_COLLECTION_PATH);
+
+                    newQuestions.forEach(q => {
+                        const docRef = doc(questionsCollectionRef);
+                        batch.set(docRef, q);
+                    });
+
+                    // Sincroniza la adición masiva con Firestore
+                    await batch.commit();
+
+                    await loadQuizData();
+                    status.textContent = `✅ Importación exitosa. Se añadieron ${newQuestions.length} preguntas.`;
+                    status.classList.remove('text-red-400');
+                    status.classList.add('text-green-400');
+                } catch (error) {
+                    console.error("Error al importar CSV:", error);
+                    status.textContent = `❌ Error de importación: ${error.message}`;
+                    status.classList.remove('text-green-400');
+                    status.classList.add('text-red-400');
+                } finally {
+                    loadingIcon.classList.add('hidden');
+                    buttonText.textContent = '⬆️ Subir e Importar';
+                    status.classList.remove('hidden');
+                    fileInput.value = ''; // Limpiar input file
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        // --- REINICIO DE LEADERBOARD ---
+
+        window.showResetModal = function() {
+            if (isAdmin) {
+                window.showConfirmationModal(
+                    "🚨 Confirmar Reinicio de Leaderboard", 
+                    "Esta acción es irreversible y eliminará **TODAS** las puntuaciones. ¿Estás seguro?",
+                    "Confirmar Borrado",
+                    (confirmed) => {
+                        if (confirmed) resetLeaderboard();
+                    }
+                );
+            }
+        }
+
+        async function resetLeaderboard() {
+            if (!window.db) { console.error("La base de datos de Firebase no está lista."); return; } 
+            
+            const statusDisplay = document.getElementById('firebase-status');
+            statusDisplay.textContent = '⚠️ Reiniciando Leaderboard. Por favor, espera...'; 
+            
+            try {
+                const q = query(collection(window.db, window.PLAYER_SCORES_COLLECTION_PATH));
+                const snapshot = await window.getDocs(q);
+                
+                // Usa una transacción para eliminar en lote y garantizar la sincronización
+                const deleteCount = await window.runTransaction(window.db, async (transaction) => {
+                    let count = 0;
+                    snapshot.forEach((doc) => {
+                        transaction.delete(doc.ref);
+                        count++;
+                    });
+                    return count;
+                });
+                
+                console.log(`Éxito: Se eliminaron ${deleteCount} documentos del leaderboard.`);
+                statusDisplay.textContent = `✅ Leaderboard reiniciado (${deleteCount} documentos borrados). ID: ${window.userId.substring(0, 8)}...`;
+
+                if (!document.getElementById('results-screen').classList.contains('hidden')) {
+                    loadLeaderboard(); 
+                }
+
+            } catch (e) {
+                console.error("Error al reiniciar la tabla de clasificación:", e);
+                statusDisplay.textContent = `❌ Error al reiniciar: ${e.message}`;
+            }
+        }
+        
+        // --- 5. Lógica del Quiz y Puntuación ---
         
         window.registerPlayer = function() {
             const inputElement = document.getElementById('player-name-input');
@@ -292,9 +909,14 @@
             playerName = inputElement.value.trim();
 
             if (playerName.length < 2) {
+                errorElement.textContent = "Introduce un nombre válido.";
                 errorElement.classList.remove('hidden');
-                // Usamos un simple cambio de color en el borde como feedback
                 inputElement.classList.add('border-2', 'border-red-500');
+                return;
+            }
+            if (QUESTIONS.length === 0) {
+                errorElement.textContent = "No hay preguntas cargadas. Contacta al administrador.";
+                errorElement.classList.remove('hidden');
                 return;
             }
             
@@ -304,25 +926,14 @@
             startGame();
         }
 
-        function updateUI() {
-            document.getElementById('question-counter').textContent = `${currentQuestionIndex + 1} / ${QUESTIONS.length}`;
-            document.getElementById('score-display').textContent = `Puntos: ${score}`;
-        }
-
-        function showScreen(screenId) {
-            const screens = ['start-screen', 'quiz-screen', 'feedback-screen', 'results-screen'];
-            screens.forEach(id => {
-                document.getElementById(id).classList.add('hidden');
-            });
-            document.getElementById(screenId).classList.remove('hidden');
-        }
-
         function startGame() {
-            // Inicializar Tone.js al empezar el juego 
             initTone(); 
-            
             score = 0;
             currentQuestionIndex = 0;
+            // Configurar el timer para el juego
+            timer = gameConfig.timerDuration; 
+            document.getElementById('timer-display').textContent = timer; 
+            
             updateUI();
             showScreen('quiz-screen');
             loadQuestion();
@@ -333,36 +944,47 @@
                 return showResults();
             }
 
-            // Ocultar feedback y mostrar quiz
             showScreen('quiz-screen');
             isQuestionActive = true;
 
             const questionData = QUESTIONS[currentQuestionIndex];
             document.getElementById('question-text').textContent = `${questionData.emoji} ${questionData.text}`;
             
-            // Renderizar botones de respuesta
             const answersGrid = document.getElementById('answers-grid');
             answersGrid.innerHTML = '';
             
-            const colors = ["bg-red-500", "bg-blue-500", "bg-yellow-500", "bg-green-500"];
-            const shapes = ["▲", "◆", "●", "◼️"]; // Emojis/Símbolos para los botones
+            const colors = ["bg-green-500", "bg-red-500", "bg-blue-500", "bg-yellow-500"];
+            const shapes = ["▲", "◆", "●", "◼️"];
 
-            questionData.answers.forEach((answer, index) => {
+            const originalAnswers = questionData.answers;
+            const correctText = originalAnswers[questionData.correctIndex || 0]; 
+            
+            const mixedAnswers = originalAnswers.map((text) => ({
+                text: text,
+                isCorrect: text === correctText
+            }));
+
+            // Función para mezclar (Fisher-Yates)
+            for (let i = mixedAnswers.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [mixedAnswers[i], mixedAnswers[j]] = [mixedAnswers[j], mixedAnswers[i]];
+            }
+
+            mixedAnswers.forEach((answer, index) => {
                 const button = document.createElement('button');
-                button.innerHTML = `<span class="text-xl mr-2">${shapes[index]}</span> ${answer}`;
+                button.innerHTML = `<span class="text-xl mr-2">${shapes[index]}</span> ${answer.text}`;
                 button.className = `answer-button ${colors[index]} text-white font-bold p-4 rounded-xl text-left shadow-md transform transition duration-150`;
-                button.onclick = () => handleAnswer(index);
+                button.onclick = () => handleAnswer(answer.isCorrect, button, originalAnswers.indexOf(correctText));
                 answersGrid.appendChild(button);
             });
 
-            // Reiniciar y arrancar el temporizador
             resetTimer();
             startTimer();
         }
 
         function resetTimer() {
             clearInterval(countdownInterval);
-            timer = TIME_LIMIT;
+            timer = gameConfig.timerDuration;
             const timerDisplay = document.getElementById('timer-display');
             timerDisplay.textContent = timer;
             timerDisplay.classList.remove('text-red-500', 'animate-pulse');
@@ -382,57 +1004,55 @@
 
                 if (timer <= 0) {
                     clearInterval(countdownInterval);
-                    handleAnswer(-1); // Tiempo agotado
+                    handleAnswer(false, null, 0); // Tiempo agotado
                 }
             }, 1000);
         }
 
-        window.handleAnswer = function(selectedIndex) {
-            if (!isQuestionActive) return; // Evita doble click
+        window.handleAnswer = function(isCorrect, selectedButton, correctOriginalIndex) {
+            if (!isQuestionActive) return; 
             isQuestionActive = false;
             clearInterval(countdownInterval);
             
             const questionData = QUESTIONS[currentQuestionIndex];
-            const isCorrect = selectedIndex === questionData.correctIndex;
+            const correctText = questionData.answers[correctOriginalIndex];
+
             let points = 0;
 
-            // Deshabilitar todos los botones para evitar más clics
-            const buttons = document.getElementById('answers-grid').querySelectorAll('button');
-            buttons.forEach(button => button.onclick = null);
+            const allButtons = document.getElementById('answers-grid').querySelectorAll('button');
+            allButtons.forEach(button => button.onclick = null);
 
-            // Mostrar feedback visual
-            const correctAnswerButton = buttons[questionData.correctIndex];
-            
-            if (selectedIndex !== -1) {
-                const selectedButton = buttons[selectedIndex];
-                if (isCorrect) {
-                    // Cálculo de puntos: Base 1000, bonificación por tiempo
-                    points = 200 + Math.floor((timer / TIME_LIMIT) * 800);
-                    score += points;
-                    
-                    selectedButton.classList.add('correct-answer');
-                    if (isToneInitialized) sounds.correct();
-                    displayFeedback("¡Correcto! 🎉", `Ganaste ${points} puntos.`, 'text-green-400');
-                } else {
-                    selectedButton.classList.add('incorrect-answer');
-                    correctAnswerButton.classList.add('correct-answer');
-                    if (isToneInitialized) sounds.incorrect();
-                    displayFeedback("¡Incorrecto! 😥", "La respuesta correcta se marca en verde.", 'text-red-400');
+            let correctAnswerButton = null;
+            allButtons.forEach(button => {
+                if (button.textContent.includes(correctText)) {
+                    correctAnswerButton = button;
                 }
+            });
+            
+            if (isCorrect) {
+                // Cálculo de puntos dinámico basado en la configuración
+                const basePoints = gameConfig.questionPoints;
+                const timeFactor = timer / gameConfig.timerDuration;
+                points = basePoints + Math.floor(timeFactor * basePoints); // Máximo 2x los puntos base
+                score += points;
+                
+                if (selectedButton) selectedButton.classList.add('correct-answer');
+                if (isToneInitialized) sounds.correct();
+                displayFeedback("¡Correcto! 🎉", `Ganaste ${points} puntos.`, 'text-green-400');
             } else {
-                // Tiempo agotado
-                correctAnswerButton.classList.add('correct-answer');
+                if (selectedButton) selectedButton.classList.add('incorrect-answer');
+                if (correctAnswerButton) correctAnswerButton.classList.add('correct-answer');
+                
                 if (isToneInitialized) sounds.incorrect();
-                displayFeedback("¡Tiempo Agotado! ⏱️", "Debes responder más rápido.", 'text-yellow-400');
+                displayFeedback(selectedButton ? "¡Incorrecto! 😥" : "¡Tiempo Agotado! ⏱️", "La respuesta correcta se marca en verde.", 'text-red-400');
             }
 
             updateUI();
             
-            // Pasar a la siguiente pregunta después de un breve momento
             setTimeout(() => {
                 currentQuestionIndex++;
                 loadQuestion();
-            }, 2500); // 2.5 segundos de feedback
+            }, 2500); 
         }
 
         function displayFeedback(emoji, text, colorClass) {
@@ -446,32 +1066,29 @@
         function showResults() {
             if (isToneInitialized) sounds.gameOver();
             document.getElementById('final-score').textContent = score;
-            document.getElementById('player-name-final').textContent = playerName; // Muestra el nombre del jugador
+            document.getElementById('player-name-final').textContent = playerName; 
             showScreen('results-screen');
-            savePlayerScore(); // Guardar la puntuación del jugador actual
-            loadLeaderboard(); // Cargar la tabla de clasificación
+            savePlayerScore(); 
+            loadLeaderboard(); 
         }
 
-        // --- 5. Lógica de Puntuación Alta (Firestore) ---
+        // --- 6. Lógica de Puntuación Alta (Firestore) ---
 
-        // Se obtiene la ruta completa de la colección pública del entorno (definida en el módulo script)
         const PLAYER_SCORES_COLLECTION = window.PLAYER_SCORES_COLLECTION_PATH; 
 
         window.loadLeaderboard = async function() {
             const leaderboardList = document.getElementById('leaderboard-list');
-            leaderboardList.innerHTML = '<p class="text-gray-400">Cargando mejores puntuaciones...</p>'; // Limpiar y poner cargando
+            leaderboardList.innerHTML = '<p class="text-gray-400">Cargando mejores puntuaciones...</p>'; 
 
             if (!window.db) {
-                 console.warn("La base de datos de Firebase no está lista para cargar el leaderboard.");
                  leaderboardList.innerHTML = '<p class="text-red-400">Error: Base de datos no disponible.</p>';
                  return;
             } 
             
             try {
-                // 1. Crear consulta para las 10 mejores puntuaciones (descendente)
-                // Usamos orderBy('timestamp', 'asc') para desempate si las puntuaciones son iguales
+                // Consulta el leaderboard, sincronizando los datos en tiempo real
                 const q = query(
-                    collection(window.db, PLAYER_SCORES_COLLECTION), // Usa la ruta de colección pública
+                    collection(window.db, PLAYER_SCORES_COLLECTION),
                     window.orderBy('score', 'desc'),
                     window.orderBy('timestamp', 'asc'), 
                     window.limit(10)
@@ -489,7 +1106,7 @@
                         const rank = index + 1;
                         const rankColor = rank === 1 ? 'text-yellow-400' : rank === 2 ? 'text-gray-300' : rank === 3 ? 'text-amber-600' : 'text-gray-100';
                         
-                        // Determinar si es la puntuación del jugador actual para resaltarla
+                        // Resaltar la puntuación del jugador actual si es el mismo usuario y nombre/puntuación
                         const highlightClass = data.userId === window.userId && data.playerName === playerName && data.score === score ? 'bg-indigo-700 p-2 rounded-lg font-bold' : 'p-2';
 
                         htmlContent += `
@@ -511,24 +1128,22 @@
         }
 
         function savePlayerScore() {
-             // Verificar si las variables globales de Firebase existen
             if (!window.db || !window.userId || !playerName || !window.serverTimestamp) {
                 console.warn("No se puede guardar la puntuación. Faltan datos (DB, ID de Usuario, Nombre o serverTimestamp).");
                 return;
             }
 
             try {
-                // Usamos addDoc para añadir un nuevo documento a la colección PLAYER_SCORES_COLLECTION
                 const collectionRef = collection(window.db, PLAYER_SCORES_COLLECTION);
                 
                 const scoreData = {
                     score: score,
                     playerName: playerName,
                     userId: window.userId,
-                    // Usar serverTimestamp() para la hora del servidor
                     timestamp: window.serverTimestamp() 
                 };
                 
+                // Sincroniza la nueva puntuación del jugador con Firestore
                 window.addDoc(collectionRef, scoreData)
                     .then(() => {
                         console.log("Puntuación del jugador guardada exitosamente:", score);
@@ -542,9 +1157,8 @@
             }
         }
         
-        // Llamada inicial que se ejecuta DESPUÉS de que todos los scripts, incluyendo el módulo, se hayan cargado.
+        // Llamada inicial al cargar la ventana
         window.onload = () => {
-             // Muestra la pantalla de inicio al cargar
              showScreen('start-screen'); 
         };
 
