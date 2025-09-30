@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quiz: Estrés y Ansiedad</title>
+    <!-- Carga de Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Configuración de la fuente Inter y colores de Tailwind -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #1a202c; /* Color de fondo oscuro */
+            color: #e2e8f0; /* Color de texto claro */
+        }
+        .kahoot-card {
+            background-color: #2d3748; /* Color de fondo de las tarjetas */
+            box-shadow: 0 10px 15px rgba(0, 0, 0, 0.5);
+            transition: transform 0.1s ease-out;
+        }
+        .answer-button {
+            transition: all 0.15s ease-in-out;
+        }
+        .answer-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        .correct-answer {
+            background-color: #38a169 !important; /* Verde oscuro */
+            animation: pulse-correct 0.5s 3;
+        }
+        .incorrect-answer {
+            background-color: #e53e3e !important; /* Rojo oscuro */
+            animation: shake 0.5s;
+        }
+        @keyframes pulse-correct {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.03); }
+        }
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            20%, 60% { transform: translateX(-5px); }
+            40%, 80% { transform: translateX(5px); }
+        }
+    </style>
+
+    <!-- Importar Firebase y librerías de sonido (Módulo) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        // Importamos serverTimestamp para guardar la hora del servidor correctamente
+        import { getFirestore, doc, setDoc, getDoc, collection, query, limit, getDocs, addDoc, orderBy, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import * as Tone from "https://cdn.jsdelivr.net/npm/tone@14.7.58/build/Tone.js";
+
+        // Exponer módulos clave al ámbito global para el script principal
+        window.Tone = Tone;
+        window.initializeApp = initializeApp;
+        window.getAuth = getAuth;
+        window.signInAnonymously = signInAnonymously;
+        window.signInWithCustomToken = signInWithCustomToken;
+        window.onAuthStateChanged = onAuthStateChanged;
+        window.getFirestore = getFirestore;
+        window.doc = doc;
+        window.setDoc = setDoc;
+        window.getDoc = getDoc;
+        window.collection = collection;
+        window.query = query;
+        window.limit = limit;
+        window.getDocs = getDocs;
+        window.addDoc = addDoc; 
+        window.orderBy = orderBy; 
+        window.serverTimestamp = serverTimestamp; 
+        
+        // --- 1. CONFIGURACIÓN DE FIREBASE ACTUALIZADA ---
+        // Configuración proporcionada por el usuario como respaldo (fallback)
+        const USER_FIREBASE_CONFIG = {
+            apiKey: "AIzaSyB_MWIOKXfn0oGsT9i6WKYmLYCzVDwQRm8",
+            authDomain: "appkahoottaller.firebaseapp.com",
+            projectId: "appkahoottaller",
+            storageBucket: "appkahoottaller.firebasestorage.app",
+            messagingSenderId: "564353351189",
+            appId: "1:564353351189:web:0311919a72a7a3c55f181c",
+            measurementId: "G-HTRHMNV4BG"
+        };
+        
+        // Priorizamos la configuración de Firebase proporcionada por el entorno (__firebase_config) 
+        // para garantizar la compatibilidad con la autenticación Canvas.
+        const ENVIRONMENT_CONFIG = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const FIREBASE_CONFIG = ENVIRONMENT_CONFIG || USER_FIREBASE_CONFIG;
+        
+        // NOTA: Para las rutas de Firestore (ej. /artifacts/{appId}/...), 
+        // priorizamos el __app_id del entorno, o usamos el projectId del usuario como alternativa.
+        const appIdForPaths = typeof __app_id !== 'undefined' ? __app_id : FIREBASE_CONFIG.projectId;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // --- 2. DEFINICIÓN DE LA RUTA PÚBLICA DE FIRESTORE ---
+        // Se establece la ruta completa de la colección pública para el Leaderboard
+        window.PLAYER_SCORES_COLLECTION_PATH = `/artifacts/${appIdForPaths}/public/data/player_scores`;
+
+
+        let db, auth, userId = 'anon';
+
+        // Inicialización y autenticación de Firebase
+        window.initFirebase = async () => {
+            try {
+                // Usamos la configuración combinada (priorizando la del entorno) para inicializar la app.
+                const app = initializeApp(FIREBASE_CONFIG);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Autenticación con token inicial (si existe, es una cadena y no está vacía) o anónima
+                if (initialAuthToken && typeof initialAuthToken === 'string' && initialAuthToken.length > 0) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        document.getElementById('firebase-status').textContent = `✅ Usuario ID: ${userId.substring(0, 8)}...`;
+                        console.log('Firebase initialized and authenticated. User ID:', userId);
+                        window.db = db;
+                        window.auth = auth;
+                        window.userId = userId;
+                    } else {
+                        console.error("User not signed in.");
+                        document.getElementById('firebase-status').textContent = '❌ Error de autenticación';
+                    }
+                });
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                // Si la autenticación falla, mostramos el error específico
+                document.getElementById('firebase-status').textContent = `❌ Error al cargar Firebase: ${error.code || error.message}`;
+            }
+        };
+
+        window.initFirebase();
+    </script>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+
+    <!-- Contenedor Principal de la Aplicación -->
+    <div id="app-container" class="w-full max-w-lg mx-auto">
+        
+        <!-- Estado de Firebase (para debug/información) -->
+        <p id="firebase-status" class="text-xs text-center mb-2 text-gray-500">Cargando Firebase...</p>
+
+        <!-- Cabecera del Juego -->
+        <div class="flex justify-between items-center mb-6 p-4 rounded-lg bg-gray-700 kahoot-card">
+            <div id="score-display" class="text-xl font-bold">Puntos: 0</div>
+            <div id="timer-display" class="text-4xl font-black text-yellow-300">15</div>
+            <div id="question-counter" class="text-xl font-bold">1 / 4</div>
+        </div>
+
+        <!-- Contenedores de Pantallas (Controlados por JS) -->
+        <div id="start-screen" class="kahoot-card p-8 rounded-xl text-center">
+            <h1 class="text-5xl font-extrabold mb-4 text-pink-400">🧠 Quiz de Repaso 💭</h1>
+            <p class="text-lg mb-6 text-gray-300">¡Ingresa tu nombre para empezar a competir!</p>
+
+            <!-- Área de Registro de Jugador -->
+            <input type="text" id="player-name-input" placeholder="Tu Nombre o Nickname" class="w-full p-3 mb-4 rounded-lg text-lg text-gray-900 bg-gray-200 focus:outline-none focus:ring-2 focus:ring-pink-500"/>
+            <p id="name-error" class="text-red-400 text-sm mb-4 hidden">Por favor, introduce un nombre válido.</p>
+            
+            <button onclick="registerPlayer()" class="bg-green-500 hover:bg-green-600 text-white font-bold py-4 px-8 rounded-full shadow-lg transform hover:scale-105 transition duration-200">
+                🚀 ¡Registrar y Empezar!
+            </button>
+        </div>
+
+        <div id="quiz-screen" class="hidden">
+            <!-- Área de la Pregunta -->
+            <div id="question-area" class="kahoot-card p-8 rounded-xl mb-4 min-h-[150px] flex items-center justify-center">
+                <p id="question-text" class="text-3xl font-bold text-center text-white"></p>
+            </div>
+            
+            <!-- Área de las Respuestas (Grid de 2x2) -->
+            <div id="answers-grid" class="grid grid-cols-2 gap-4">
+                <!-- Los botones se insertarán aquí por JavaScript -->
+            </div>
+        </div>
+
+        <div id="feedback-screen" class="hidden kahoot-card p-12 rounded-xl text-center min-h-[300px] flex flex-col items-center justify-center">
+            <p id="feedback-emoji" class="text-6xl mb-4"></p>
+            <p id="feedback-text" class="text-3xl font-bold"></p>
+            <p id="points-awarded" class="text-xl mt-2 text-gray-300"></p>
+        </div>
+
+        <div id="results-screen" class="hidden kahoot-card p-8 rounded-xl text-center">
+            <h2 class="text-4xl font-extrabold mb-4 text-indigo-400">🎉 ¡Resultados de <span id="player-name-final" class="text-yellow-300"></span>! 🎉</h2>
+            <p class="text-xl font-semibold mb-2">Tu Puntuación Final:</p>
+            <p class="text-6xl font-black text-green-400 mb-8" id="final-score">0</p>
+            
+            <!-- Tabla de Clasificación Global -->
+            <div class="mb-8 p-4 bg-gray-600 rounded-lg">
+                <p class="text-2xl font-bold mb-3 text-pink-300">🏆 Tabla de Clasificación Global</p>
+                <div id="leaderboard-list" class="text-left space-y-2">
+                    <!-- La lista se genera aquí por JavaScript -->
+                    <p class="text-gray-400">Cargando mejores puntuaciones...</p>
+                </div>
+            </div>
+
+            <button onclick="window.location.reload()" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-4 px-8 rounded-full shadow-lg transform hover:scale-105 transition duration-200">
+                🔄 Jugar de Nuevo
+            </button>
+        </div>
+
+    </div>
+
+    <!-- Script de la Aplicación -->
+    <script>
+        // --- 1. Definición de Preguntas y Opciones ---
+        const QUESTIONS = [
+            {
+                text: "¿Cómo se llama el estrés que es intenso, pero de corta duración, y puede incluso ser motivador?",
+                answers: ["Estrés Crónico", "Estrés Agudo", "Burnout", "Ansiedad Generalizada"],
+                correctIndex: 1, // Estrés Agudo
+                emoji: "⚡️"
+            },
+            {
+                text: "La Ansiedad es una respuesta emocional que anticipa una amenaza futura. ¿Cuál es su principal diferencia con el Miedo?",
+                answers: ["Es siempre menos intensa.", "Se enfoca en un peligro vago o futuro.", "Solo tiene síntomas físicos.", "Solo ocurre en personas con fobias."],
+                correctIndex: 1, // Se enfoca en un peligro vago o futuro.
+                emoji: "🕰️"
+            },
+            {
+                text: "¿Cuál de estos es un síntoma **físico** común del estrés prolongado?",
+                answers: ["Tristeza persistente", "Dificultad para concentrarse", "Tensión muscular o dolores de cabeza", "Irritabilidad"],
+                correctIndex: 2, // Tensión muscular o dolores de cabeza
+                emoji: "💪"
+            },
+            {
+                text: "El estrés Crónico se caracteriza por ser persistente y agotador. ¿A qué condición psicológica puede conducir si no se gestiona?",
+                answers: ["Felicidad Extrema", "Síndrome de Diógenes", "Apatía y Agotamiento ('Burnout')", "Memoria Fotográfica"],
+                correctIndex: 2, // Apatía y Agotamiento ('Burnout')
+                emoji: " exhaustion"
+            }
+        ];
+
+        // --- 2. Variables de Estado del Juego ---
+        let currentQuestionIndex = 0;
+        let score = 0;
+        let timer = 15;
+        let countdownInterval;
+        let isQuestionActive = false;
+        const TIME_LIMIT = 15; // Segundos
+        let playerName = ''; // Nuevo: Almacenar el nombre del jugador
+
+        // --- 3. Inicialización de Sonidos (Tone.js) ---
+        let synth;
+        let sounds = {};
+        let isToneInitialized = false;
+
+        // Inicializa Tone.js solo cuando se llama (al empezar el juego)
+        function initTone() {
+            if (isToneInitialized) return;
+            
+            if (!window.Tone) {
+                console.error("Tone.js library is not loaded. Cannot initialize sounds.");
+                return;
+            }
+            
+            // Destructurar explícitamente los constructores para evitar TypeError
+            const { PolySynth, Synth } = window.Tone;
+
+            if (!PolySynth || !Synth) {
+                console.error("Tone.js PolySynth or Synth constructors are not available.");
+                return;
+            }
+
+            // Creación del sintetizador y sonidos
+            synth = new PolySynth(Synth, {
+                oscillator: { type: "square" },
+                envelope: { release: 0.1 }
+            }).toDestination();
+
+            sounds = {
+                correct: () => { synth.triggerAttackRelease(["C5", "E5", "G5"], "8n"); },
+                incorrect: () => { synth.triggerAttackRelease("C3", "4n"); },
+                timerTick: () => { synth.triggerAttackRelease("A2", "32n"); },
+                gameOver: () => { synth.triggerAttackRelease(["C4", "G3", "C3"], "1n", "+0.1"); }
+            };
+            isToneInitialized = true;
+        }
+
+        // --- 4. Funciones de Control del Flujo del Juego y Registro ---
+        
+        window.registerPlayer = function() {
+            const inputElement = document.getElementById('player-name-input');
+            const errorElement = document.getElementById('name-error');
+            
+            playerName = inputElement.value.trim();
+
+            if (playerName.length < 2) {
+                errorElement.classList.remove('hidden');
+                // Usamos un simple cambio de color en el borde como feedback
+                inputElement.classList.add('border-2', 'border-red-500');
+                return;
+            }
+            
+            errorElement.classList.add('hidden');
+            inputElement.classList.remove('border-2', 'border-red-500');
+            
+            startGame();
+        }
+
+        function updateUI() {
+            document.getElementById('question-counter').textContent = `${currentQuestionIndex + 1} / ${QUESTIONS.length}`;
+            document.getElementById('score-display').textContent = `Puntos: ${score}`;
+        }
+
+        function showScreen(screenId) {
+            const screens = ['start-screen', 'quiz-screen', 'feedback-screen', 'results-screen'];
+            screens.forEach(id => {
+                document.getElementById(id).classList.add('hidden');
+            });
+            document.getElementById(screenId).classList.remove('hidden');
+        }
+
+        function startGame() {
+            // Inicializar Tone.js al empezar el juego 
+            initTone(); 
+            
+            score = 0;
+            currentQuestionIndex = 0;
+            updateUI();
+            showScreen('quiz-screen');
+            loadQuestion();
+        }
+
+        function loadQuestion() {
+            if (currentQuestionIndex >= QUESTIONS.length) {
+                return showResults();
+            }
+
+            // Ocultar feedback y mostrar quiz
+            showScreen('quiz-screen');
+            isQuestionActive = true;
+
+            const questionData = QUESTIONS[currentQuestionIndex];
+            document.getElementById('question-text').textContent = `${questionData.emoji} ${questionData.text}`;
+            
+            // Renderizar botones de respuesta
+            const answersGrid = document.getElementById('answers-grid');
+            answersGrid.innerHTML = '';
+            
+            const colors = ["bg-red-500", "bg-blue-500", "bg-yellow-500", "bg-green-500"];
+            const shapes = ["▲", "◆", "●", "◼️"]; // Emojis/Símbolos para los botones
+
+            questionData.answers.forEach((answer, index) => {
+                const button = document.createElement('button');
+                button.innerHTML = `<span class="text-xl mr-2">${shapes[index]}</span> ${answer}`;
+                button.className = `answer-button ${colors[index]} text-white font-bold p-4 rounded-xl text-left shadow-md transform transition duration-150`;
+                button.onclick = () => handleAnswer(index);
+                answersGrid.appendChild(button);
+            });
+
+            // Reiniciar y arrancar el temporizador
+            resetTimer();
+            startTimer();
+        }
+
+        function resetTimer() {
+            clearInterval(countdownInterval);
+            timer = TIME_LIMIT;
+            const timerDisplay = document.getElementById('timer-display');
+            timerDisplay.textContent = timer;
+            timerDisplay.classList.remove('text-red-500', 'animate-pulse');
+            timerDisplay.classList.add('text-yellow-300');
+        }
+
+        function startTimer() {
+            countdownInterval = setInterval(() => {
+                timer--;
+                const timerDisplay = document.getElementById('timer-display');
+                timerDisplay.textContent = timer;
+                
+                if (timer <= 5) {
+                    timerDisplay.classList.add('text-red-500', 'animate-pulse');
+                    if (isToneInitialized) sounds.timerTick();
+                }
+
+                if (timer <= 0) {
+                    clearInterval(countdownInterval);
+                    handleAnswer(-1); // Tiempo agotado
+                }
+            }, 1000);
+        }
+
+        window.handleAnswer = function(selectedIndex) {
+            if (!isQuestionActive) return; // Evita doble click
+            isQuestionActive = false;
+            clearInterval(countdownInterval);
+            
+            const questionData = QUESTIONS[currentQuestionIndex];
+            const isCorrect = selectedIndex === questionData.correctIndex;
+            let points = 0;
+
+            // Deshabilitar todos los botones para evitar más clics
+            const buttons = document.getElementById('answers-grid').querySelectorAll('button');
+            buttons.forEach(button => button.onclick = null);
+
+            // Mostrar feedback visual
+            const correctAnswerButton = buttons[questionData.correctIndex];
+            
+            if (selectedIndex !== -1) {
+                const selectedButton = buttons[selectedIndex];
+                if (isCorrect) {
+                    // Cálculo de puntos: Base 1000, bonificación por tiempo
+                    points = 200 + Math.floor((timer / TIME_LIMIT) * 800);
+                    score += points;
+                    
+                    selectedButton.classList.add('correct-answer');
+                    if (isToneInitialized) sounds.correct();
+                    displayFeedback("¡Correcto! 🎉", `Ganaste ${points} puntos.`, 'text-green-400');
+                } else {
+                    selectedButton.classList.add('incorrect-answer');
+                    correctAnswerButton.classList.add('correct-answer');
+                    if (isToneInitialized) sounds.incorrect();
+                    displayFeedback("¡Incorrecto! 😥", "La respuesta correcta se marca en verde.", 'text-red-400');
+                }
+            } else {
+                // Tiempo agotado
+                correctAnswerButton.classList.add('correct-answer');
+                if (isToneInitialized) sounds.incorrect();
+                displayFeedback("¡Tiempo Agotado! ⏱️", "Debes responder más rápido.", 'text-yellow-400');
+            }
+
+            updateUI();
+            
+            // Pasar a la siguiente pregunta después de un breve momento
+            setTimeout(() => {
+                currentQuestionIndex++;
+                loadQuestion();
+            }, 2500); // 2.5 segundos de feedback
+        }
+
+        function displayFeedback(emoji, text, colorClass) {
+            document.getElementById('feedback-emoji').textContent = emoji;
+            document.getElementById('feedback-text').textContent = text;
+            document.getElementById('feedback-text').className = `text-3xl font-bold ${colorClass}`;
+            document.getElementById('points-awarded').textContent = text.includes('Ganaste') ? text : '';
+            showScreen('feedback-screen');
+        }
+
+        function showResults() {
+            if (isToneInitialized) sounds.gameOver();
+            document.getElementById('final-score').textContent = score;
+            document.getElementById('player-name-final').textContent = playerName; // Muestra el nombre del jugador
+            showScreen('results-screen');
+            savePlayerScore(); // Guardar la puntuación del jugador actual
+            loadLeaderboard(); // Cargar la tabla de clasificación
+        }
+
+        // --- 5. Lógica de Puntuación Alta (Firestore) ---
+
+        // Se obtiene la ruta completa de la colección pública del entorno (definida en el módulo script)
+        const PLAYER_SCORES_COLLECTION = window.PLAYER_SCORES_COLLECTION_PATH; 
+
+        window.loadLeaderboard = async function() {
+            const leaderboardList = document.getElementById('leaderboard-list');
+            leaderboardList.innerHTML = '<p class="text-gray-400">Cargando mejores puntuaciones...</p>'; // Limpiar y poner cargando
+
+            if (!window.db) {
+                 console.warn("La base de datos de Firebase no está lista para cargar el leaderboard.");
+                 leaderboardList.innerHTML = '<p class="text-red-400">Error: Base de datos no disponible.</p>';
+                 return;
+            } 
+            
+            try {
+                // 1. Crear consulta para las 10 mejores puntuaciones (descendente)
+                // Usamos orderBy('timestamp', 'asc') para desempate si las puntuaciones son iguales
+                const q = query(
+                    collection(window.db, PLAYER_SCORES_COLLECTION), // Usa la ruta de colección pública
+                    window.orderBy('score', 'desc'),
+                    window.orderBy('timestamp', 'asc'), 
+                    window.limit(10)
+                );
+
+                const querySnapshot = await window.getDocs(q);
+                
+                let htmlContent = '';
+                
+                if (querySnapshot.empty) {
+                    htmlContent = '<p class="text-gray-400">Sé el primero en jugar y registrar tu puntuación.</p>';
+                } else {
+                    querySnapshot.forEach((doc, index) => {
+                        const data = doc.data();
+                        const rank = index + 1;
+                        const rankColor = rank === 1 ? 'text-yellow-400' : rank === 2 ? 'text-gray-300' : rank === 3 ? 'text-amber-600' : 'text-gray-100';
+                        
+                        // Determinar si es la puntuación del jugador actual para resaltarla
+                        const highlightClass = data.userId === window.userId && data.playerName === playerName && data.score === score ? 'bg-indigo-700 p-2 rounded-lg font-bold' : 'p-2';
+
+                        htmlContent += `
+                            <div class="flex justify-between items-center ${highlightClass} transition duration-150">
+                                <span class="font-black ${rankColor} w-1/6">${rank}.</span>
+                                <span class="w-3/6 truncate">${data.playerName || 'Anónimo'}</span>
+                                <span class="font-extrabold w-2/6 text-right">${data.score} Puntos</span>
+                            </div>
+                        `;
+                    });
+                }
+                
+                leaderboardList.innerHTML = htmlContent;
+
+            } catch (e) {
+                console.error("Error al cargar la tabla de clasificación:", e);
+                leaderboardList.innerHTML = '<p class="text-red-400">Error: Base de datos no disponible.</p>';
+            }
+        }
+
+        function savePlayerScore() {
+             // Verificar si las variables globales de Firebase existen
+            if (!window.db || !window.userId || !playerName || !window.serverTimestamp) {
+                console.warn("No se puede guardar la puntuación. Faltan datos (DB, ID de Usuario, Nombre o serverTimestamp).");
+                return;
+            }
+
+            try {
+                // Usamos addDoc para añadir un nuevo documento a la colección PLAYER_SCORES_COLLECTION
+                const collectionRef = collection(window.db, PLAYER_SCORES_COLLECTION);
+                
+                const scoreData = {
+                    score: score,
+                    playerName: playerName,
+                    userId: window.userId,
+                    // Usar serverTimestamp() para la hora del servidor
+                    timestamp: window.serverTimestamp() 
+                };
+                
+                window.addDoc(collectionRef, scoreData)
+                    .then(() => {
+                        console.log("Puntuación del jugador guardada exitosamente:", score);
+                    })
+                    .catch(e => {
+                        console.error("Error al guardar la puntuación del jugador:", e);
+                    });
+
+            } catch (e) {
+                console.error("Error general en savePlayerScore:", e);
+            }
+        }
+        
+        // Llamada inicial que se ejecuta DESPUÉS de que todos los scripts, incluyendo el módulo, se hayan cargado.
+        window.onload = () => {
+             // Muestra la pantalla de inicio al cargar
+             showScreen('start-screen'); 
+        };
+
+    </script>
+</body>
+</html>
